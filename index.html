@@ -18,6 +18,8 @@
      ----------------------------------------------------------------
      EDIT POINTS:
        • GHL_LEAD_WEBHOOK  -> paste your GHL inbound-webhook URL (capture)
+       • GHL_VIEW_WEBHOOK  -> optional 2nd webhook for property-view activity
+                              (leave blank to reuse GHL_LEAD_WEBHOOK)
        • DEALS[]           -> add / edit / remove properties
      ============================================================ -->
 
@@ -375,6 +377,13 @@ a{color:var(--blue);text-decoration:none}
 // Until set, the gate still unlocks so the page is fully usable.
 var GHL_LEAD_WEBHOOK = "";
 
+// Paste your GHL inbound-webhook URL for PROPERTY-VIEW activity. Whenever a known
+// buyer (one who has already unlocked, so we hold their email/phone) opens a
+// property, we POST that view here so a GHL workflow can create/advance their
+// opportunity in the Buyer pipeline and tag the property they looked at.
+// Leave "" to reuse GHL_LEAD_WEBHOOK — one webhook can drive both leads + views.
+var GHL_VIEW_WEBHOOK = "";
+
 // ===== VISITOR TRACKING — logs every property view to your Google Sheet =====
 // Paste your Google Apps Script web-app /exec URL here (see TRACKING_SETUP.md).
 // Until set, views are still counted per-browser and ride along with each lead.
@@ -396,6 +405,32 @@ function trackEvent(type, deal, extra){
   if(extra){ for(var k in extra){ payload[k]=extra[k]; } }
   if(!TRACK_URL){ console.log("[SPC track]", type, payload.deal||"-", "view#"+payload.views, "(no TRACK_URL set)"); return; }
   try{ fetch(TRACK_URL,{method:"POST",mode:"no-cors",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify(payload),keepalive:true}).catch(function(){}); }catch(e){}
+}
+
+// ===== GOHIGHLEVEL — relay a property view into the Buyer pipeline =====
+// Fires whenever a KNOWN buyer opens a property. GHL needs an email or phone to
+// create/update a contact, so this only sends once the buyer has unlocked (we
+// then hold spc_lead). Anonymous views are still counted locally and ride along
+// with the lead the moment the buyer identifies themselves. The GHL workflow
+// keyed to this webhook should: Create/Update Contact (by email) -> add/advance
+// an Opportunity in the "Buyer" pipeline -> tag "Property Viewer" + note address.
+function ghlViewWebhook(){ return GHL_VIEW_WEBHOOK || GHL_LEAD_WEBHOOK; }
+function sendViewToGHL(deal){
+  var lead={}; try{ lead=JSON.parse(localStorage.getItem("spc_lead")||"{}"); }catch(e){}
+  if(!lead.email && !lead.phone) return;            // no contact yet -> nothing GHL can key a lead on
+  var count = deal ? (getViews()[deal.id]||0) : 0;
+  var payload={
+    event:"property_view", pipeline:"Buyer", stage:"New Lead",
+    name:lead.name||"", email:lead.email||"", phone:lead.phone||"", buyer_type:lead.buyer_type||"",
+    deal: deal?deal.id:"", property: deal?deal.name:"",
+    address: deal?(deal.street+", "+deal.city+", "+deal.state+" "+deal.zip):"",
+    price: deal?deal.price:"", arv: deal?deal.arv:"",
+    views: count, firstView: count<=1, viewsAll:getViews(),
+    vid:VID, source:"homes.spchomestx.net", ts:new Date().toISOString(), ref:document.referrer||""
+  };
+  var url=ghlViewWebhook();
+  if(!url){ console.log("[SPC] property view -> GHL (no webhook set):", payload.property||"-", "view#"+count); return; }
+  try{ fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload),keepalive:true}).catch(function(){}); }catch(e){}
 }
 
 var SB = "https://gqhfgqiahynbedbzurzq.supabase.co/storage/v1/render/image/public/photos/listings/";
@@ -598,7 +633,7 @@ function openModal(id){
   var d = DEALS.find(function(x){return x.id===id;});
   if(!d) return;
   modalDeal = d;
-  bumpView(id); trackEvent("view", d);
+  bumpView(id); trackEvent("view", d); sendViewToGHL(d);
   document.getElementById("modalInner").innerHTML = modalHTML(d);
   document.getElementById("ov").classList.add("open");
   document.body.style.overflow = "hidden";
